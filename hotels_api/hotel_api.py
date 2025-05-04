@@ -32,7 +32,8 @@ def get_rate_to_eur(from_currency: str, locale: str = "en-gb") -> float:
     Récupère via l'API Booking.com le taux de conversion from_currency → EUR.
     Met en cache pour éviter les appels répétitifs.
     """
-    if from_currency.upper() == "EUR":
+    from_currency = from_currency.upper()
+    if from_currency == "EUR":
         return 1.0
     if from_currency in _rates_cache:
         return _rates_cache[from_currency]
@@ -41,14 +42,12 @@ def get_rate_to_eur(from_currency: str, locale: str = "en-gb") -> float:
     try:
         resp = requests.get(EXCHANGE_URL, headers=HEADERS, params=params)
         resp.raise_for_status()
-        data = resp.json()
-        rate = data["rates"]["EUR"]
+        rate = resp.json()["rates"]["EUR"]
         _rates_cache[from_currency] = rate
         return rate
     except Exception as e:
         print("[Erreur get_rate_to_eur]", e)
-        # fallback 1:1 en cas de problème
-        return 1.0
+        return 1.0  # fallback
 
 def get_destination_id(city_name: str) -> str | None:
     """
@@ -76,22 +75,23 @@ def search_hotels(
 ) -> list[dict]:
     """
     Recherche jusqu'à 9 hôtels, convertit les prix en EUR,
-    et filtre sur budget_max (en euros) si fourni.
-    Renvoie une liste de dicts formatés.
+    filtre sur budget_max (en euros) si fourni,
+    et renvoie la liste formatée.
     """
     url = "https://booking-com.p.rapidapi.com/v1/hotels/search"
     params = {
-        "checkin_date":      checkin_date,
-        "checkout_date":     checkout_date,
-        "adults_number":     adults,
-        "room_number":       1,
-        "dest_id":           dest_id,
-        "dest_type":         "city",
-        "order_by":          "popularity",
-        "locale":            "en-gb",
-        "units":             "metric",
-        "include_adjacency": "true",
-        "page_number":       0
+        "checkin_date":       checkin_date,
+        "checkout_date":      checkout_date,
+        "adults_number":      adults,
+        "room_number":        1,
+        "dest_id":            dest_id,
+        "dest_type":          "city",
+        "order_by":           "popularity",
+        "locale":             "en-gb",
+        "units":              "metric",
+        "include_adjacency":  "true",
+        "page_number":        0,
+        "filter_by_currency": "EUR",      # ← indispensable pour éviter le 422
     }
     if children > 0:
         params["children_number"] = children
@@ -99,26 +99,29 @@ def search_hotels(
 
     try:
         res = requests.get(url, headers=HEADERS, params=params)
+        # En cas d'erreur, on affiche le body pour comprendre le 422
+        if not res.ok:
+            print(f"[Erreur search_hotels] HTTP {res.status_code} :", res.text)
         res.raise_for_status()
+
         results = res.json().get("result", [])
 
         # Filtrage budget (en euros) si demandé
         if budget_max is not None:
             def total_eur(h):
-                cents = _safe_float(h.get("price_breakdown", {}).get("gross_price"))
-                orig_cur = h.get("price_breakdown", {}).get("currency", "EUR")
+                cents    = _safe_float(h["price_breakdown"].get("gross_price"))
+                orig_cur = h["price_breakdown"].get("currency", "EUR")
                 return (cents / 100.0) * get_rate_to_eur(orig_cur)
             results = [h for h in results if total_eur(h) <= budget_max]
 
         # Formatage et limite à 9 hôtels
-        hotels = [
+        return [
             format_hotel_info(h, checkin_date, checkout_date)
             for h in results[:9]
         ]
-        return hotels
 
     except Exception as e:
-        print("[Erreur search_hotels]", e)
+        print("[Exception search_hotels]", e)
         return []
 
 def format_hotel_info(
@@ -133,13 +136,13 @@ def format_hotel_info(
       - nights : nombre de nuits
       - name, address, photo, rating, room, booking_url, currency
     """
-    pb = hotel.get("price_breakdown", {})
-    cents = _safe_float(pb.get("gross_price", 0))
+    pb       = hotel.get("price_breakdown", {})
+    cents    = _safe_float(pb.get("gross_price", 0))
     orig_cur = pb.get("currency", "EUR")
 
     # Conversion → euros
-    amount = cents / 100.0
-    rate   = get_rate_to_eur(orig_cur)
+    amount    = cents / 100.0
+    rate      = get_rate_to_eur(orig_cur)
     total_eur = round(amount * rate, 2)
 
     # Calcul du nombre de nuits
