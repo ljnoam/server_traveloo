@@ -1,3 +1,5 @@
+# app.py
+
 import os
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
@@ -8,9 +10,18 @@ from hotel_api import get_destination_id, search_hotels
 load_dotenv()
 
 app = Flask(__name__)
+
 # Origines CORS depuis .env (on peut restreindre ici plus finement)
 origins = os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
-CORS(app, resources={r"/api/*": {"origins": origins}})
+
+# Configuration CORS pour gérer OPTIONS et autoriser nos requêtes front
+CORS(
+    app,
+    resources={r"/api/*": {"origins": origins}},
+    methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+    supports_credentials=True
+)
 
 @app.route("/api/hotels", methods=["POST"])
 def api_hotels():
