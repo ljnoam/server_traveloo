@@ -6,8 +6,8 @@ from dotenv import load_dotenv
 
 # Chargement des variables d'environnement
 load_dotenv()
-RAPIDAPI_KEY        = os.getenv("RAPIDAPI_KEY")
-RAPIDAPI_HOST_HOTELS= os.getenv("RAPIDAPI_HOST_HOTELS")
+RAPIDAPI_KEY         = os.getenv("RAPIDAPI_KEY")
+RAPIDAPI_HOST_HOTELS = os.getenv("RAPIDAPI_HOST_HOTELS")
 
 HEADERS = {
     "x-rapidapi-key": RAPIDAPI_KEY,
@@ -15,7 +15,7 @@ HEADERS = {
 }
 
 def _safe_float(val):
-    """Convertit val en float ou retourne +inf en cas d'erreur."""
+    """Convertit val en float ou retourne +inf."""
     try:
         return float(val)
     except (TypeError, ValueError):
@@ -46,8 +46,7 @@ def search_hotels(
     budget_max: float | None = None
 ) -> list[dict]:
     """
-    Recherche jusqu'à 9 hôtels, en EUR (filter_by_currency),
-    filtre sur budget_max (en euros) si demandé,
+    Recherche jusqu'à 9 hôtels en EUR, filtre sur budget_max (en €)
     et renvoie la liste formatée.
     """
     url = "https://booking-com.p.rapidapi.com/v1/hotels/search"
@@ -63,7 +62,7 @@ def search_hotels(
         "units":              "metric",
         "include_adjacency":  "true",
         "page_number":        0,
-        "filter_by_currency": "EUR",   # prix déjà en euros
+        "filter_by_currency": "EUR",   # l’API renvoie déjà en euros
     }
     if children > 0:
         params["children_number"] = children
@@ -74,14 +73,13 @@ def search_hotels(
         res.raise_for_status()
         results = res.json().get("result", [])
 
-        # Filtrer par budget total (en euros) si demandé
+        # Filtrer par budget total en € si nécessaire
         if budget_max is not None:
             def total_eur(h):
-                cents = _safe_float(h["price_breakdown"].get("gross_price"))
-                return cents / 100.0
+                return _safe_float(h["price_breakdown"].get("gross_price"))
             results = [h for h in results if total_eur(h) <= budget_max]
 
-        # Formatage et limite à 9
+        # Formater et ne garder que 9 hôtels
         return [
             format_hotel_info(h, checkin_date, checkout_date)
             for h in results[:9]
@@ -97,17 +95,17 @@ def format_hotel_info(
     checkout_date: str
 ) -> dict:
     """
-    Formate :
-      - total  : prix pour tout le séjour (€/€)
-      - price  : prix par nuit (€/€)
+    Formate les infos d'un hôtel :
+      - total  : prix pour tout le séjour (en €)
+      - price  : prix par nuit (en €)
       - nights : nombre de nuits
-      + nom, adresse, photo, note, room, url
+      + nom, adresse, photo, note, room, booking_url, currency
     """
-    pb    = hotel.get("price_breakdown", {})
-    cents = _safe_float(pb.get("gross_price", 0))
-    total = round(cents / 100.0, 2)
+    pb       = hotel.get("price_breakdown", {})
+    raw_price= _safe_float(pb.get("gross_price", 0))
+    total    = round(raw_price, 2)
 
-    # Nombre de nuits
+    # Calcul du nombre de nuits
     try:
         d1 = datetime.fromisoformat(checkin_date)
         d2 = datetime.fromisoformat(checkout_date)
@@ -132,7 +130,7 @@ def format_hotel_info(
     }
 
 def clean_room_info(text: str) -> str:
-    """Enlève les balises HTML et &nbsp;."""
+    """Supprime balises HTML et &nbsp;."""
     if not text:
         return ""
     text = re.sub(r"<[^>]+>", "", text)
