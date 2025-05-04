@@ -1,54 +1,97 @@
 import os
 import re
 import requests
+from datetime import datetime
 from dotenv import load_dotenv
 
 # Chargement des variables d'environnement
 load_dotenv()
-RAPIDAPI_KEY  = os.getenv("RAPIDAPI_KEY")
-RAPIDAPI_HOST = os.getenv("RAPIDAPI_HOST_HOTELS")
+RAPIDAPI_KEY        = os.getenv("RAPIDAPI_KEY")
+RAPIDAPI_HOST_HOTELS= os.getenv("RAPIDAPI_HOST_HOTELS")
 
 HEADERS = {
     "x-rapidapi-key": RAPIDAPI_KEY,
-    "x-rapidapi-host": RAPIDAPI_HOST
+    "x-rapidapi-host": RAPIDAPI_HOST_HOTELS
 }
 
-def get_destination_id(city_name):
+# Endpoint pour récupérer les taux de change
+EXCHANGE_URL = "https://booking-com.p.rapidapi.com/v1/metadata/exchange-rates"
+
+# Cache en mémoire des taux de change { "USD": 0.92, ... }
+_rates_cache: dict[str, float] = {}
+
+def _safe_float(val):
+    """Convertit en float ou retourne +inf pour filtrage budget."""
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return float("inf")
+
+def get_rate_to_eur(from_currency: str, locale: str = "en-gb") -> float:
+    """
+    Récupère via l'API Booking.com le taux de conversion from_currency → EUR.
+    Met en cache pour éviter les appels répétitifs.
+    """
+    if from_currency.upper() == "EUR":
+        return 1.0
+    if from_currency in _rates_cache:
+        return _rates_cache[from_currency]
+
+    params = {"currency": from_currency, "locale": locale}
+    try:
+        resp = requests.get(EXCHANGE_URL, headers=HEADERS, params=params)
+        resp.raise_for_status()
+        data = resp.json()
+        rate = data["rates"]["EUR"]
+        _rates_cache[from_currency] = rate
+        return rate
+    except Exception as e:
+        print("[Erreur get_rate_to_eur]", e)
+        # fallback 1:1 en cas de problème
+        return 1.0
+
+def get_destination_id(city_name: str) -> str | None:
     """
     Récupère l'ID Booking.com d'une ville à partir de son nom.
     """
     url = "https://booking-com.p.rapidapi.com/v1/hotels/locations"
     params = {"name": city_name, "locale": "en-gb"}
     try:
-        response = requests.get(url, headers=HEADERS, params=params)
-        response.raise_for_status()
-        data = response.json()
-        for d in data:
+        r = requests.get(url, headers=HEADERS, params=params)
+        r.raise_for_status()
+        for d in r.json():
             if d.get("dest_type") == "city":
                 return d.get("dest_id")
     except Exception as e:
         print("[Erreur get_destination_id]", e)
     return None
 
-def search_hotels(dest_id, checkin_date, checkout_date, adults, children, budget_max=None):
+def search_hotels(
+    dest_id: str,
+    checkin_date: str,
+    checkout_date: str,
+    adults: int,
+    children: int,
+    budget_max: float | None = None
+) -> list[dict]:
     """
-    Recherche des hôtels et renvoie une liste de dictionnaires formatés.
-    Les prix sont déjà demandés en EUR grâce à filter_by_currency.
+    Recherche jusqu'à 9 hôtels, convertit les prix en EUR,
+    et filtre sur budget_max (en euros) si fourni.
+    Renvoie une liste de dicts formatés.
     """
     url = "https://booking-com.p.rapidapi.com/v1/hotels/search"
     params = {
-        "checkin_date":       checkin_date,
-        "checkout_date":      checkout_date,
-        "adults_number":      adults,
-        "room_number":        1,
-        "dest_id":            dest_id,
-        "dest_type":          "city",
-        "order_by":           "popularity",
-        "locale":             "en-gb",
-        "units":              "metric",
-        "filter_by_currency": "EUR",      # ← l’API renvoie déjà en euros
-        "include_adjacency":  "true",
-        "page_number":        "0"
+        "checkin_date":      checkin_date,
+        "checkout_date":     checkout_date,
+        "adults_number":     adults,
+        "room_number":       1,
+        "dest_id":           dest_id,
+        "dest_type":         "city",
+        "order_by":          "popularity",
+        "locale":            "en-gb",
+        "units":             "metric",
+        "include_adjacency": "true",
+        "page_number":       0
     }
     if children > 0:
         params["children_number"] = children
@@ -57,55 +100,74 @@ def search_hotels(dest_id, checkin_date, checkout_date, adults, children, budget
     try:
         res = requests.get(url, headers=HEADERS, params=params)
         res.raise_for_status()
-        hotels = res.json().get("result", [])
+        results = res.json().get("result", [])
 
-        # Filtrer par budget total si nécessaire
+        # Filtrage budget (en euros) si demandé
         if budget_max is not None:
-            hotels = [
-                h for h in hotels
-                # on castera aussi en float pour comparer
-                if _safe_float(h.get("price_breakdown", {}).get("gross_price")) <= budget_max
-            ]
+            def total_eur(h):
+                cents = _safe_float(h.get("price_breakdown", {}).get("gross_price"))
+                orig_cur = h.get("price_breakdown", {}).get("currency", "EUR")
+                return (cents / 100.0) * get_rate_to_eur(orig_cur)
+            results = [h for h in results if total_eur(h) <= budget_max]
 
-        # Ne garder que les 9 premiers
-        return [format_hotel_info(h) for h in hotels[:9]]
+        # Formatage et limite à 9 hôtels
+        hotels = [
+            format_hotel_info(h, checkin_date, checkout_date)
+            for h in results[:9]
+        ]
+        return hotels
+
     except Exception as e:
         print("[Erreur search_hotels]", e)
         return []
 
-def _safe_float(val):
+def format_hotel_info(
+    hotel: dict,
+    checkin_date: str,
+    checkout_date: str
+) -> dict:
     """
-    Essaie de convertir val en float ; sinon retourne +inf pour exclure du budget.
+    Formate les infos d'un hôtel :
+      - total  : prix pour tout le séjour (€)
+      - price  : prix par nuit (€)
+      - nights : nombre de nuits
+      - name, address, photo, rating, room, booking_url, currency
     """
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return float("inf")
+    pb = hotel.get("price_breakdown", {})
+    cents = _safe_float(pb.get("gross_price", 0))
+    orig_cur = pb.get("currency", "EUR")
 
-def format_hotel_info(hotel):
-    """
-    Extrait et formate les infos d'un hôtel, en supposant que
-    gross_price (string ou nombre) soit converti en EUR.
-    """
-    raw = hotel.get("price_breakdown", {}).get("gross_price")
-    raw_price = _safe_float(raw)
-    price_eur = round(raw_price, 2) if raw_price != float("inf") else None
+    # Conversion → euros
+    amount = cents / 100.0
+    rate   = get_rate_to_eur(orig_cur)
+    total_eur = round(amount * rate, 2)
+
+    # Calcul du nombre de nuits
+    try:
+        d1 = datetime.fromisoformat(checkin_date)
+        d2 = datetime.fromisoformat(checkout_date)
+        nights = max((d2 - d1).days, 1)
+    except Exception:
+        nights = 1
+
+    per_night = round(total_eur / nights, 2)
 
     return {
         "name":        hotel.get("hotel_name", "Hôtel inconnu"),
         "address":     hotel.get("address", ""),
-        "price":       price_eur,
-        "currency":    "€",
         "photo":       hotel.get("max_photo_url", ""),
         "rating":      hotel.get("review_score"),
         "room":        clean_room_info(hotel.get("unit_configuration_label", "")),
-        "booking_url": hotel.get("url", "#")
+        "booking_url": hotel.get("url", "#"),
+
+        "nights":      nights,
+        "total":       total_eur,
+        "price":       per_night,
+        "currency":    "€"
     }
 
-def clean_room_info(text):
-    """
-    Enlève les balises HTML et les espaces insécables.
-    """
+def clean_room_info(text: str) -> str:
+    """Enlève balises HTML et &nbsp;."""
     if not text:
         return ""
     text = re.sub(r"<[^>]+>", "", text)
