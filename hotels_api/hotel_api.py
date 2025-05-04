@@ -63,7 +63,8 @@ def search_hotels(dest_id, checkin_date, checkout_date, adults, children, budget
         if budget_max is not None:
             hotels = [
                 h for h in hotels
-                if h.get("price_breakdown", {}).get("gross_price", float("inf")) <= budget_max
+                # on castera aussi en float pour comparer
+                if _safe_float(h.get("price_breakdown", {}).get("gross_price")) <= budget_max
             ]
 
         # Ne garder que les 9 premiers
@@ -72,13 +73,23 @@ def search_hotels(dest_id, checkin_date, checkout_date, adults, children, budget
         print("[Erreur search_hotels]", e)
         return []
 
+def _safe_float(val):
+    """
+    Essaie de convertir val en float ; sinon retourne +inf pour exclure du budget.
+    """
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return float("inf")
+
 def format_hotel_info(hotel):
     """
     Extrait et formate les infos d'un hôtel, en supposant que
-    gross_price est déjà en euros.
+    gross_price (string ou nombre) soit converti en EUR.
     """
-    raw_price = hotel.get("price_breakdown", {}).get("gross_price")
-    price_eur = round(raw_price, 2) if raw_price is not None else None
+    raw = hotel.get("price_breakdown", {}).get("gross_price")
+    raw_price = _safe_float(raw)
+    price_eur = round(raw_price, 2) if raw_price != float("inf") else None
 
     return {
         "name":        hotel.get("hotel_name", "Hôtel inconnu"),
